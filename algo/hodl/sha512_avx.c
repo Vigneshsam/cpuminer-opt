@@ -1,5 +1,7 @@
 #ifndef __AVX2__
-#ifdef __AVX__
+
+#if defined(__SSE4_2__)
+//#ifdef __AVX__
 
 //Dependencies
 #include <string.h>
@@ -8,6 +10,10 @@
 #ifdef __FreeBSD__
 #include <sys/endian.h>
 #endif 
+
+#if defined(__CYGWIN__)
+#include <endian.h>
+#endif
 
 #include "tmmintrin.h"
 #include "smmintrin.h"

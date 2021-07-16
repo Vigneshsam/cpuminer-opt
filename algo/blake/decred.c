@@ -1,4 +1,7 @@
 #include "decred-gate.h"
+
+#if !defined(DECRED_8WAY) && !defined(DECRED_4WAY)
+
 #include "sph_blake.h"
 
 #include <string.h>
@@ -52,12 +55,14 @@ void decred_hash_simple(void *state, const void *input)
         sph_blake256_close(&ctx, state);
 }
 
-int scanhash_decred(int thr_id, struct work *work, uint32_t max_nonce, uint64_t *hashes_done)
+int scanhash_decred( struct work *work, uint32_t max_nonce,
+               uint64_t *hashes_done, struct thr_info *mythr )
 {
         uint32_t _ALIGN(64) endiandata[48];
         uint32_t _ALIGN(64) hash32[8];
         uint32_t *pdata = work->data;
         uint32_t *ptarget = work->target;
+   int thr_id = mythr->id;  // thr_id arg is deprecated
 
 //        #define DCR_NONCE_OFT32 35
 
@@ -75,25 +80,15 @@ int scanhash_decred(int thr_id, struct work *work, uint32_t max_nonce, uint64_t 
                 be32enc(&endiandata[k], pdata[k]);
 #endif
 
-#ifdef DEBUG_ALGO
-        if (!thr_id) applog(LOG_DEBUG,"[%d] Target=%08x %08x", thr_id, ptarget[6], ptarget[7]);
-#endif
-
         do {
                 //be32enc(&endiandata[DCR_NONCE_OFT32], n);
                 endiandata[DECRED_NONCE_INDEX] = n;
                 decred_hash(hash32, endiandata);
 
-                if (hash32[7] <= HTarget && fulltest(hash32, ptarget)) {
-                        work_set_target_ratio(work, hash32);
-                        *hashes_done = n - first_nonce + 1;
-#ifdef DEBUG_ALGO
-                        applog(LOG_BLUE, "Nonce : %08x %08x", n, swab32(n));
-                        applog_hash(ptarget);
-                        applog_compare_hash(hash32, ptarget);
-#endif
-                        pdata[DECRED_NONCE_INDEX] = n;
-                        return 1;
+                if (hash32[7] <= HTarget && fulltest(hash32, ptarget))
+                {
+                   pdata[DECRED_NONCE_INDEX] = n;
+                   submit_solution( work, hash32, mythr );
                 }
 
                 n++;
@@ -141,7 +136,7 @@ void decred_decode_extradata( struct work* work, uint64_t* net_blocks )
    if (!have_longpoll && work->height > *net_blocks + 1)
    {
       char netinfo[64] = { 0 };
-      if (opt_showdiff && net_diff > 0.)
+      if (net_diff > 0.)
       {
          if (net_diff != work->targetdiff)
 	    sprintf(netinfo, ", diff %.3f, target %.1f", net_diff,
@@ -267,8 +262,7 @@ bool register_decred_algo( algo_gate_t* gate )
   gate->scanhash              = (void*)&scanhash_decred;
   gate->hash                  = (void*)&decred_hash;
   gate->get_nonceptr          = (void*)&decred_get_nonceptr;
-  gate->get_max64             = (void*)&get_max64_0x3fffffLL;
-  gate->display_extra_data    = (void*)&decred_decode_extradata;
+  gate->decode_extra_data     = (void*)&decred_decode_extradata;
   gate->build_stratum_request = (void*)&decred_be_build_stratum_request;
   gate->work_decode           = (void*)&std_be_work_decode;
   gate->submit_getwork_result = (void*)&std_be_submit_getwork_result;
@@ -284,3 +278,5 @@ bool register_decred_algo( algo_gate_t* gate )
   return true;
 }
 */
+
+#endif

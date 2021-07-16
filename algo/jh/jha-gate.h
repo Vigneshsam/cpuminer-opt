@@ -5,21 +5,21 @@
 #include <stdint.h>
 
 
-#if defined(FOUR_WAY) && defined(__AVX2__) && !defined(NO_AES_NI)
+#if defined(__AVX2__) && defined(__AES__)
   #define JHA_4WAY
 #endif
 
 #if defined JHA_4WAY
 void jha_hash_4way( void *state, const void *input );
 
-int scanhash_jha_4way( int thr_id, struct work *work, uint32_t max_nonce,
-                       uint64_t *hashes_done );
+int scanhash_jha_4way( struct work *work, uint32_t max_nonce,
+                       uint64_t *hashes_done, struct thr_info *mythr );
 #endif
 
 void jha_hash( void *state, const void *input );
 
-int scanhash_jha( int thr_id, struct work *work, uint32_t max_nonce,
-                     uint64_t *hashes_done );
+int scanhash_jha( struct work *work, uint32_t max_nonce,
+                     uint64_t *hashes_done, struct thr_info *mythr );
 
 #endif
 

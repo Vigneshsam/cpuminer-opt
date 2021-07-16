@@ -1,6 +1,9 @@
+#include "lyra2-gate.h"
+
+#if !( defined(LYRA2H_8WAY) || defined(LYRA2H_4WAY) )
+
 #include <memory.h>
 #include <mm_malloc.h>
-#include "algo-gate-api.h"
 #include "lyra2.h"
 #include "algo/blake/sph_blake.h"
 
@@ -8,8 +11,7 @@ __thread uint64_t* lyra2h_matrix;
 
 bool lyra2h_thread_init()
 {
-   const int i = 16 * 16 * 96;
-   lyra2h_matrix = _mm_malloc( i, 64 );
+   lyra2h_matrix = _mm_malloc( LYRA2H_MATRIX_SIZE, 64 );
    return lyra2h_matrix;
 }
 
@@ -36,8 +38,8 @@ void lyra2h_hash( void *state, const void *input )
     memcpy(state, hash, 32);
 }
 
-int scanhash_lyra2h( int thr_id, struct work *work, uint32_t max_nonce,
-                    uint64_t *hashes_done )
+int scanhash_lyra2h( struct work *work, uint32_t max_nonce,
+                    uint64_t *hashes_done, struct thr_info *mythr )
 {
 	uint32_t _ALIGN(64) hash[8];
 	uint32_t _ALIGN(64) endiandata[20];
@@ -46,6 +48,7 @@ int scanhash_lyra2h( int thr_id, struct work *work, uint32_t max_nonce,
 	const uint32_t Htarg = ptarget[7];
 	const uint32_t first_nonce = pdata[19];
 	uint32_t nonce = first_nonce;
+   int thr_id = mythr->id;  // thr_id arg is deprecated
 
 	if (opt_benchmark)
 		ptarget[7] = 0x0000ff;
@@ -54,40 +57,21 @@ int scanhash_lyra2h( int thr_id, struct work *work, uint32_t max_nonce,
 		be32enc(&endiandata[i], pdata[i]);
 	}
 
-        lyra2h_midstate( endiandata );
-
+   lyra2h_midstate( endiandata );
 	do {
 		be32enc(&endiandata[19], nonce);
                 lyra2h_hash( hash, endiandata );
 
-		if (hash[7] <= Htarg && fulltest(hash, ptarget)) {
-			work_set_target_ratio(work, hash);
+		if ( hash[7] <= Htarg )
+      if ( fulltest( hash, ptarget ) && !opt_benchmark )
+      {
 			pdata[19] = nonce;
-			*hashes_done = pdata[19] - first_nonce;
-			return 1;
-		}
+         submit_solution( work, hash, mythr );
+      }
 		nonce++;
-
 	} while (nonce < max_nonce && !work_restart[thr_id].restart);
-
 	pdata[19] = nonce;
 	*hashes_done = pdata[19] - first_nonce + 1;
 	return 0;
 }
-
-void lyra2h_set_target( struct work* work, double job_diff )
-{
- work_set_target( work, job_diff / (256.0 * opt_diff_factor) );
-}
-
-bool register_lyra2h_algo( algo_gate_t* gate )
-{
-  gate->optimizations = AVX_OPT | AVX2_OPT;
-  gate->miner_thread_init = (void*)&lyra2h_thread_init;
-  gate->scanhash   = (void*)&scanhash_lyra2h;
-  gate->hash       = (void*)&lyra2h_hash;
-  gate->get_max64  = (void*)&get_max64_0xffffLL;
-  gate->set_target = (void*)&lyra2h_set_target;
-  return true;
-};
-
+#endif

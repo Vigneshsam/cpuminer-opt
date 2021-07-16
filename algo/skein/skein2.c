@@ -1,4 +1,7 @@
-#include "algo-gate-api.h"
+#include "skein-gate.h"
+
+#if !defined(SKEIN_8WAY) && !defined(SKEIN_4WAY)
+
 #include <string.h>
 #include <stdint.h>
 
@@ -34,8 +37,8 @@ void skein2hash(void *output, const void *input)
 
 }
 
-int scanhash_skein2(int thr_id, struct work *work,
-	uint32_t max_nonce, uint64_t *hashes_done)
+int scanhash_skein2( struct work *work,	uint32_t max_nonce,
+                     uint64_t *hashes_done, struct thr_info *mythr )
 {
         uint32_t *pdata = work->data;
         uint32_t *ptarget = work->target;
@@ -44,6 +47,7 @@ int scanhash_skein2(int thr_id, struct work *work,
 	const uint32_t Htarg = ptarget[7];
 	const uint32_t first_nonce = pdata[19];
 	uint32_t n = first_nonce;
+   int thr_id = mythr->id;  // thr_id arg is deprecated
 
         swab32_array( endiandata, pdata, 20 );
 
@@ -65,4 +69,4 @@ int scanhash_skein2(int thr_id, struct work *work,
 	return 0;
 }
 
-
+#endif

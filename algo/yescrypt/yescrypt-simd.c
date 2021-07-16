@@ -33,9 +33,11 @@
  * gcc bug 54349 (fixed for gcc 4.9+).  On 32-bit, it's of direct help.  AVX
  * and XOP are of further help either way.
  */
+/*
 #ifndef __SSE4_1__
 #warning "Consider enabling SSE4.1, AVX, or XOP in the C compiler for significantly better performance"
 #endif
+*/
 
 #include <emmintrin.h>
 #ifdef __XOP__
@@ -46,9 +48,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include "sha256_Y.h"
-#include "sysendian.h"
-
+#include "algo/sha/hmac-sha256-hash.h"
 #include "yescrypt.h"
 #include "yescrypt-platform.h"
 
@@ -1149,7 +1149,7 @@ yescrypt_kdf(const yescrypt_shared_t * shared, yescrypt_local_t * local,
     const uint8_t * passwd, size_t passwdlen,
     const uint8_t * salt, size_t saltlen,
     uint64_t N, uint32_t r, uint32_t p, uint32_t t, yescrypt_flags_t flags,
-    uint8_t * buf, size_t buflen)
+    uint8_t * buf, size_t buflen, int thrid )
 {
 	uint8_t _ALIGN(128) sha256[32];
 	yescrypt_region_t tmp;
@@ -1157,6 +1157,7 @@ yescrypt_kdf(const yescrypt_shared_t * shared, yescrypt_local_t * local,
 	size_t B_size, V_size, XY_size, need;
 	uint8_t * B, * S;
 	salsa20_blk_t * V, * XY;
+   int retval = 1;
 
 	/*
 	 * YESCRYPT_PARALLEL_SMIX is a no-op at p = 1 for its intended purpose,
@@ -1301,17 +1302,7 @@ yescrypt_kdf(const yescrypt_shared_t * shared, yescrypt_local_t * local,
 		S = (uint8_t *)XY + XY_size;
 
 	if (t || flags) {
-#ifndef USE_SPH_SHA
-		SHA256_CTX ctx;
-		SHA256_Init(&ctx);
-		SHA256_Update(&ctx, passwd, passwdlen);
-		SHA256_Final(sha256, &ctx);
-#else
-                SHA256_CTX_Y ctx;
-                SHA256_Init_Y(&ctx);
-                SHA256_Update_Y(&ctx, passwd, passwdlen);
-                SHA256_Final_Y(sha256, &ctx);
-#endif
+		SHA256_Buf( passwd, passwdlen, sha256 );
 		passwd = sha256;
 		passwdlen = sizeof(sha256);
 	}
@@ -1319,6 +1310,12 @@ yescrypt_kdf(const yescrypt_shared_t * shared, yescrypt_local_t * local,
 	/* 1: (B_0 ... B_{p-1}) <-- PBKDF2(P, S, 1, p * MFLen) */
 	PBKDF2_SHA256(passwd, passwdlen, salt, saltlen, 1, B, B_size);
 
+   if ( work_restart[thrid].restart ) 
+   { 
+     retval = 0; 
+     goto out;
+   }
+   
 	if (t || flags)
 		memcpy(sha256, B, sizeof(sha256));
 
@@ -1346,9 +1343,21 @@ yescrypt_kdf(const yescrypt_shared_t * shared, yescrypt_local_t * local,
 		}
 	}
 
+   if ( work_restart[thrid].restart )
+   {
+     retval = 0;
+     goto out;
+   }
+
 	/* 5: DK <-- PBKDF2(P, B, 1, dkLen) */
 	PBKDF2_SHA256(passwd, passwdlen, B, B_size, 1, buf, buflen);
 
+   if ( work_restart[thrid].restart ) 
+   { 
+     retval = 0; 
+     goto out;
+   }
+   
 	/*
 	 * Except when computing classic scrypt, allow all computation so far
 	 * to be performed on the client.  The final steps below match those of
@@ -1361,31 +1370,23 @@ yescrypt_kdf(const yescrypt_shared_t * shared, yescrypt_local_t * local,
 	   {
 		HMAC_SHA256_CTX ctx;
 		HMAC_SHA256_Init(&ctx, buf, buflen);
-                if ( client_key_hack ) // GlobalBoost-Y buggy yescrypt
-			HMAC_SHA256_Update(&ctx, salt, saltlen);
-                else // Proper yescrypt
-                        HMAC_SHA256_Update(&ctx, "Client Key", 10);
+                if ( yescrypt_client_key )
+                    HMAC_SHA256_Update( &ctx, (uint8_t*)yescrypt_client_key,
+                                        yescrypt_client_key_len );
+                else
+                    HMAC_SHA256_Update( &ctx, salt, saltlen );
 		HMAC_SHA256_Final(sha256, &ctx);
 	   }
 	   /* Compute StoredKey */
 	   {
-#ifndef USE_SPH_SHA
-		SHA256_CTX ctx;
-		SHA256_Init(&ctx);
-		SHA256_Update(&ctx, sha256, sizeof(sha256));
-		SHA256_Final(buf, &ctx);
-#else
-                SHA256_CTX_Y ctx;
-                SHA256_Init_Y(&ctx);
-                SHA256_Update_Y(&ctx, sha256, sizeof(sha256));
-                SHA256_Final_Y(buf, &ctx);
-#endif
+		SHA256_Buf( sha256, sizeof(sha256), buf );
 	   }
 	}
 
+out:   
 	if (free_region(&tmp))
 		return -1;
 
 	/* Success! */
-	return 0;
+	return retval;
 }

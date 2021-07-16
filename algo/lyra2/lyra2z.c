@@ -1,9 +1,12 @@
 #include <memory.h>
 #include <mm_malloc.h>
-#include "lyra2z-gate.h"
+#include "lyra2-gate.h"
+
+#if !( defined(LYRA2Z_16WAY) || defined(LYRA2Z_8WAY) || defined(LYRA2Z_4WAY) )
+
 #include "lyra2.h"
 #include "algo/blake/sph_blake.h"
-#include "avxdefs.h"
+#include "simd-utils.h"
 
 __thread uint64_t* lyra2z_matrix;
 
@@ -43,8 +46,8 @@ void lyra2z_hash( void *state, const void *input )
     memcpy(state, hash, 32);
 }
 
-int scanhash_lyra2z( int thr_id, struct work *work, uint32_t max_nonce,
-                    uint64_t *hashes_done )
+int scanhash_lyra2z( struct work *work, uint32_t max_nonce,
+                    uint64_t *hashes_done, struct thr_info *mythr )
 {
 	uint32_t _ALIGN(64) hash[8];
 	uint32_t _ALIGN(64) endiandata[20];
@@ -53,6 +56,7 @@ int scanhash_lyra2z( int thr_id, struct work *work, uint32_t max_nonce,
 	const uint32_t Htarg = ptarget[7];
 	const uint32_t first_nonce = pdata[19];
 	uint32_t nonce = first_nonce;
+   int thr_id = mythr->id; 
 
 	if (opt_benchmark)
 		ptarget[7] = 0x0000ff;
@@ -61,62 +65,21 @@ int scanhash_lyra2z( int thr_id, struct work *work, uint32_t max_nonce,
 		be32enc(&endiandata[i], pdata[i]);
 	}
 
-        lyra2z_midstate( endiandata );
+   lyra2z_midstate( endiandata );
 
 	do {
 		be32enc(&endiandata[19], nonce);
                 lyra2z_hash( hash, endiandata );
 
-		if (hash[7] <= Htarg && fulltest(hash, ptarget)) {
-			work_set_target_ratio(work, hash);
+      if ( valid_hash( hash, ptarget ) && !opt_benchmark )
+      {
 			pdata[19] = nonce;
-			*hashes_done = pdata[19] - first_nonce;
-			return 1;
-		}
+			submit_solution( work, hash, mythr );
+	   }
 		nonce++;
-
-	} while (nonce < max_nonce && !work_restart[thr_id].restart);
-
+	} while ( nonce < max_nonce && !work_restart[thr_id].restart );
 	pdata[19] = nonce;
 	*hashes_done = pdata[19] - first_nonce + 1;
 	return 0;
 }
-
-/*
-//int64_t get_max64_0xffffLL() { return 0xffffLL; };
-
-void lyra2z_set_target( struct work* work, double job_diff )
-{
- work_set_target( work, job_diff / (256.0 * opt_diff_factor) );
-}
-
-bool zcoin_get_work_height( struct work* work, struct stratum_ctx* sctx )
-{
-   work->height = sctx->bloc_height;
-   return false;
-}
-
-
-bool lyra2z_thread_init()
-{
-   const int64_t ROW_LEN_INT64 = BLOCK_LEN_INT64 * 8; // nCols
-   const int64_t ROW_LEN_BYTES = ROW_LEN_INT64 * 8;
-
-   int i = (int64_t)ROW_LEN_BYTES * 8; // nRows;
-   lyra2z_wholeMatrix = _mm_malloc( i, 64 );
-
-   return lyra2z_wholeMatrix;
-}
-
-bool register_lyra2z_algo( algo_gate_t* gate )
-{
-  gate->optimizations = SSE2_OPT | AES_OPT | AVX_OPT | AVX2_OPT;
-  gate->miner_thread_init = (void*)&lyra2z_thread_init;
-  gate->scanhash   = (void*)&scanhash_lyra2z;
-  gate->hash       = (void*)&lyra2z_hash;
-  gate->get_max64  = (void*)&get_max64_0xffffLL;
-  gate->set_target = (void*)&lyra2z_set_target;
-//  gate->prevent_dupes = (void*)&zcoin_get_work_height;
-  return true;
-};
-*/
+#endif

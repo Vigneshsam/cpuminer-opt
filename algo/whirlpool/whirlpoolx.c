@@ -11,27 +11,28 @@ void whirlpoolx_hash(void *state, const void *input)
 	sph_whirlpool_context ctx_whirlpool;
 
 	unsigned char hash[64];
-	unsigned char hash_xored[32];
+//	unsigned char hash_xored[32];
 
 	sph_whirlpool1_init(&ctx_whirlpool);
 	sph_whirlpool1(&ctx_whirlpool, input, 80);
 	sph_whirlpool1_close(&ctx_whirlpool, hash);
 
 	// compress the 48 first bytes of the hash to 32
-	for (int i = 0; i < 32; i++) 
-		hash_xored[i] = hash[i] ^ hash[i + 16];
+//	for (int i = 0; i < 32; i++) 
+//		hash_xored[i] = hash[i] ^ hash[i + 16];
 
 	memcpy(state, hash, 32);
 }
 
-int scanhash_whirlpoolx( int thr_id, struct work* work, uint32_t max_nonce,
-                         uint64_t *hashes_done)
+int scanhash_whirlpoolx( struct work* work, uint32_t max_nonce,
+                         uint64_t *hashes_done, struct thr_info *mythr )
 {
 	uint32_t _ALIGN(128) endiandata[20];
 	uint32_t* pdata = work->data;
 	uint32_t* ptarget = work->target;
 	const uint32_t first_nonce = pdata[19];
         uint32_t n = first_nonce - 1;
+   int thr_id = mythr->id;  // thr_id arg is deprecated
 
 	if (opt_benchmark)
 		((uint32_t*)ptarget)[7] = 0x0000ff;
@@ -47,11 +48,7 @@ int scanhash_whirlpoolx( int thr_id, struct work* work, uint32_t max_nonce,
 		whirlpoolx_hash(vhash, endiandata);
 
 		if (vhash[7] <= Htarg && fulltest(vhash, ptarget))
-                {
-			work_set_target_ratio(work, vhash);
-                       *hashes_done = n - first_nonce + 1;
-			return true;
-		}
+          submit_solution( work, vhash, mythr );
 
 	} while ( n < max_nonce && !work_restart[thr_id].restart);
 

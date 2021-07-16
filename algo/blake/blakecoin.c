@@ -1,4 +1,7 @@
-#include "algo-gate-api.h"
+#include "blakecoin-gate.h"
+
+#if !defined(BLAKECOIN_8WAY) && !defined(BLAKECOIN_4WAY)
+
 #define BLAKE32_ROUNDS 8
 #include "sph_blake.h"
 
@@ -39,13 +42,14 @@ void blakecoinhash( void *state, const void *input )
 	memcpy( state, hash, 32 );
 }
 
-int scanhash_blakecoin( int thr_id, struct work *work, uint32_t max_nonce,
-                        uint64_t *hashes_done )
+int scanhash_blakecoin( struct work *work, uint32_t max_nonce,
+                        uint64_t *hashes_done, struct thr_info *mythr )
 {
         uint32_t *pdata = work->data;
         uint32_t *ptarget = work->target;
 	const uint32_t first_nonce = pdata[19];
 	uint32_t HTarget = ptarget[7];
+   int thr_id = mythr->id;  // thr_id arg is deprecated
 
 	uint32_t _ALIGN(32) hash64[8];
 	uint32_t _ALIGN(32) endiandata[20];
@@ -92,33 +96,4 @@ int scanhash_blakecoin( int thr_id, struct work *work, uint32_t max_nonce,
 	return 0;
 }
 
-/*
-void blakecoin_gen_merkle_root ( char* merkle_root, struct stratum_ctx* sctx )
-{
- SHA256( sctx->job.coinbase, (int)sctx->job.coinbase_size, merkle_root );
-}
-*/
-
-// changed to get_max64_0x3fffffLL in cpuminer-multi-decred
-int64_t blakecoin_get_max64 ()
-{
-  return 0x7ffffLL;
-}
-
-// vanilla uses default gen merkle root, otherwise identical to blakecoin
-bool register_vanilla_algo( algo_gate_t* gate )
-{
-    gate->scanhash = (void*)&scanhash_blakecoin;
-    gate->hash     = (void*)&blakecoinhash;
-    gate->get_max64 = (void*)&blakecoin_get_max64;
-    blakecoin_init( &blake_init_ctx );
-    return true;
-}
-
-bool register_blakecoin_algo( algo_gate_t* gate )
-{
-  register_vanilla_algo( gate );
-  gate->gen_merkle_root = (void*)&SHA256_gen_merkle_root;
-  return true;
-}
-
+#endif

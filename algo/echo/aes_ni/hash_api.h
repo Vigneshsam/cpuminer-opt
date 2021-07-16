@@ -15,7 +15,7 @@
 #ifndef HASH_API_H
 #define HASH_API_H
 
-#ifndef NO_AES_NI
+#ifdef __AES__
 #define HASH_IMPL_STR	"ECHO-aesni"
 #else
 #define HASH_IMPL_STR	"ECHO-vperm"
@@ -30,6 +30,7 @@
 typedef struct
 {
 	__m128i			state[4][4];
+        BitSequence             buffer[192];
 	__m128i			k;
 	__m128i			hashsize;
 	__m128i			const1536;
@@ -39,9 +40,8 @@ typedef struct
 	unsigned int	uBlockLength;
 	unsigned int	uBufferBytes;
 	DataLength		processed_bits;
-	BitSequence		buffer[192];
 
-} hashState_echo;
+} hashState_echo __attribute__ ((aligned (64)));
 
 HashReturn init_echo(hashState_echo *state, int hashbitlen);
 
@@ -55,6 +55,8 @@ HashReturn hash_echo(int hashbitlen, const BitSequence *data, DataLength databit
 
 HashReturn update_final_echo( hashState_echo *state, BitSequence *hashval,
                               const BitSequence *data, DataLength databitlen );
+HashReturn echo_full( hashState_echo *state, BitSequence *hashval,
+            int nHashSize, const BitSequence *data, DataLength databitlen );
 
 #endif // HASH_API_H
 

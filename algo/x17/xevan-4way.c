@@ -1,556 +1,681 @@
 #include "xevan-gate.h"
-
-#if defined(__AVX2__) && defined(__AES__)
-
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
 #include "algo/blake/blake-hash-4way.h"
-#include "algo/bmw/sph_bmw.h"
+#include "algo/bmw/bmw-hash-4way.h"
 #include "algo/groestl/aes_ni/hash-groestl.h"
 #include "algo/jh/jh-hash-4way.h"
 #include "algo/keccak/keccak-hash-4way.h"
 #include "algo/skein/skein-hash-4way.h"
+#include "algo/luffa/luffa-hash-2way.h"
+#include "algo/cubehash/cube-hash-2way.h"
 #include "algo/shavite/sph_shavite.h"
-#include "algo/luffa/sse2/luffa_for_sse2.h"
-#include "algo/cubehash/sse2/cubehash_sse2.h"
-#include "algo/simd/sse2/nist.h"
+#include "algo/shavite/shavite-hash-2way.h"
+#include "algo/simd/simd-hash-2way.h"
 #include "algo/echo/aes_ni/hash_api.h"
-#include "algo/hamsi/sph_hamsi.h"
-#include "algo/fugue/sph_fugue.h"
-#include "algo/shabal/sph_shabal.h"
+#include "algo/hamsi/hamsi-hash-4way.h"
+#include "algo/fugue/fugue-aesni.h"
+#include "algo/shabal/shabal-hash-4way.h"
 #include "algo/whirlpool/sph_whirlpool.h"
-#include "algo/sha/sph_sha2.h"
-#include "algo/haval/sph-haval.h"
-#include <openssl/sha.h>
+#include "algo/sha/sha-hash-4way.h"
+#include "algo/haval/haval-hash-4way.h"
+#if defined(__VAES__)
+  #include "algo/groestl/groestl512-hash-4way.h"
+  #include "algo/shavite/shavite-hash-4way.h"
+  #include "algo/echo/echo-hash-4way.h"
+#endif
 
-typedef struct {
-        blake512_4way_context   blake;
-        sph_bmw512_context      bmw;
-        hashState_groestl       groestl;
-        skein512_4way_context   skein;
-        jh512_4way_context      jh;
-        keccak512_4way_context  keccak;
-        hashState_luffa         luffa;
-        cubehashParam           cube;
-        sph_shavite512_context  shavite;
-        hashState_sd            simd;
-        hashState_echo          echo;
-        sph_hamsi512_context    hamsi;
-        sph_fugue512_context    fugue;
-        sph_shabal512_context   shabal;
-        sph_whirlpool_context   whirlpool;
-        SHA512_CTX              sha512;
-        sph_haval256_5_context  haval;
-} xevan_4way_ctx_holder;
+#if defined(XEVAN_8WAY)
 
-xevan_4way_ctx_holder xevan_4way_ctx __attribute__ ((aligned (64)));
-static __thread blake512_4way_context xevan_blake_4way_mid
-                                        __attribute__ ((aligned (64)));
-
-void init_xevan_4way_ctx()
+union _xevan_8way_context_overlay
 {
-        blake512_4way_init(&xevan_4way_ctx.blake);
-        sph_bmw512_init(&xevan_4way_ctx.bmw);
-        init_groestl( &xevan_4way_ctx.groestl, 64 );
-        skein512_4way_init(&xevan_4way_ctx.skein);
-        jh512_4way_init(&xevan_4way_ctx.jh);
-        keccak512_4way_init(&xevan_4way_ctx.keccak);
-        init_luffa( &xevan_4way_ctx.luffa, 512 );
-        cubehashInit( &xevan_4way_ctx.cube, 512, 16, 32 );
-        sph_shavite512_init( &xevan_4way_ctx.shavite );
-        init_sd( &xevan_4way_ctx.simd, 512 );
-        init_echo( &xevan_4way_ctx.echo, 512 );
-        sph_hamsi512_init( &xevan_4way_ctx.hamsi );
-        sph_fugue512_init( &xevan_4way_ctx.fugue );
-        sph_shabal512_init( &xevan_4way_ctx.shabal );
-        sph_whirlpool_init( &xevan_4way_ctx.whirlpool );
-        SHA512_Init( &xevan_4way_ctx.sha512 );
-        sph_haval256_5_init( &xevan_4way_ctx.haval );
-};
+   blake512_8way_context   blake;
+   bmw512_8way_context     bmw;
+   skein512_8way_context   skein;
+   jh512_8way_context      jh;
+   keccak512_8way_context  keccak;
+   luffa_4way_context      luffa;
+   cube_4way_context       cube;
+   simd_4way_context       simd;
+   hamsi512_8way_context   hamsi;
+   hashState_fugue         fugue;
+   shabal512_8way_context  shabal;
+   sph_whirlpool_context   whirlpool;
+   sha512_8way_context     sha512;
+   haval256_5_8way_context haval;
+#if defined(__VAES__)
+    groestl512_4way_context groestl;
+    shavite512_4way_context shavite;
+    echo_4way_context       echo;
+#else
+    hashState_groestl       groestl;
+    sph_shavite512_context  shavite;
+    hashState_echo          echo;
+#endif
+} __attribute__ ((aligned (64)));
+typedef union _xevan_8way_context_overlay xevan_8way_context_overlay;
 
-void xevan_4way_blake512_midstate( const void* input )
+int xevan_8way_hash( void *output, const void *input, int thr_id )
 {
-    memcpy( &xevan_blake_4way_mid, &xevan_4way_ctx.blake,
-            sizeof(xevan_blake_4way_mid) );
-    blake512_4way( &xevan_blake_4way_mid, input, 64 );
+     uint64_t vhash[16<<3] __attribute__ ((aligned (128)));
+     uint64_t vhashA[16<<3] __attribute__ ((aligned (64)));
+     uint64_t vhashB[16<<3] __attribute__ ((aligned (64)));
+     uint64_t hash0[16] __attribute__ ((aligned (64)));
+     uint64_t hash1[16] __attribute__ ((aligned (64)));
+     uint64_t hash2[16] __attribute__ ((aligned (64)));
+     uint64_t hash3[16] __attribute__ ((aligned (64)));
+     uint64_t hash4[16] __attribute__ ((aligned (64)));
+     uint64_t hash5[16] __attribute__ ((aligned (64)));
+     uint64_t hash6[16] __attribute__ ((aligned (64)));
+     uint64_t hash7[16] __attribute__ ((aligned (64)));
+     const int dataLen = 128;
+     xevan_8way_context_overlay ctx __attribute__ ((aligned (64)));
+
+     blake512_8way_full( &ctx.blake, vhash, input, 80 );
+     memset( &vhash[8<<3], 0, 64<<3 );
+
+     bmw512_8way_full( &ctx.bmw, vhash, vhash, dataLen );
+
+#if defined(__VAES__)
+
+     rintrlv_8x64_4x128( vhashA, vhashB, vhash, dataLen<<3 );
+
+     groestl512_4way_full( &ctx.groestl, vhashA, vhashA, dataLen );
+     groestl512_4way_full( &ctx.groestl, vhashB, vhashB, dataLen );
+
+     rintrlv_4x128_8x64( vhash, vhashA, vhashB, dataLen<<3 );
+
+#else
+
+     dintrlv_8x64( hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7,
+                   vhash, dataLen<<3 );
+
+     groestl512_full( &ctx.groestl, (char*)hash0, (char*)hash0, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash1, (char*)hash1, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash2, (char*)hash2, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash3, (char*)hash3, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash4, (char*)hash4, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash5, (char*)hash5, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash6, (char*)hash6, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash7, (char*)hash7, dataLen<<3 );
+
+     intrlv_8x64( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+#endif
+
+     skein512_8way_full( &ctx.skein, vhash, vhash, dataLen );
+
+     jh512_8way_init( &ctx.jh );
+     jh512_8way_update( &ctx.jh, vhash, dataLen );
+     jh512_8way_close( &ctx.jh, vhash );
+
+     keccak512_8way_init( &ctx.keccak );
+     keccak512_8way_update( &ctx.keccak, vhash, dataLen );
+     keccak512_8way_close( &ctx.keccak, vhash );
+
+     rintrlv_8x64_4x128( vhashA, vhashB, vhash, dataLen<<3 );
+
+     luffa512_4way_full( &ctx.luffa, vhashA, vhashA, dataLen );
+     luffa512_4way_full( &ctx.luffa, vhashB, vhashB, dataLen );
+
+     cube_4way_full( &ctx.cube, vhashA, 512, vhashA, dataLen );
+     cube_4way_full( &ctx.cube, vhashB, 512, vhashB, dataLen );
+
+#if defined(__VAES__)
+
+     shavite512_4way_full( &ctx.shavite, vhashA, vhashA, dataLen );
+     shavite512_4way_full( &ctx.shavite, vhashB, vhashB, dataLen );
+
+#else
+
+     dintrlv_4x128( hash0, hash1, hash2, hash3, vhashA, dataLen<<3 );
+     dintrlv_4x128( hash4, hash5, hash6, hash7, vhashB, dataLen<<3 );
+
+     shavite512_full( &ctx.shavite, hash0, hash0, dataLen );
+     shavite512_full( &ctx.shavite, hash1, hash1, dataLen );
+     shavite512_full( &ctx.shavite, hash2, hash2, dataLen );
+     shavite512_full( &ctx.shavite, hash3, hash3, dataLen );
+     shavite512_full( &ctx.shavite, hash4, hash4, dataLen );
+     shavite512_full( &ctx.shavite, hash5, hash5, dataLen );
+     shavite512_full( &ctx.shavite, hash6, hash6, dataLen );
+     shavite512_full( &ctx.shavite, hash7, hash7, dataLen );
+
+     intrlv_4x128( vhashA, hash0, hash1, hash2, hash3, dataLen<<3 );
+     intrlv_4x128( vhashB, hash4, hash5, hash6, hash7, dataLen<<3 );
+
+#endif
+
+     simd512_4way_full( &ctx.simd, vhashA, vhashA, dataLen );
+     simd512_4way_full( &ctx.simd, vhashB, vhashB, dataLen );
+
+#if defined(__VAES__)
+
+     echo_4way_full( &ctx.echo, vhashA, 512, vhashA, dataLen );
+     echo_4way_full( &ctx.echo, vhashB, 512, vhashB, dataLen );
+
+     rintrlv_4x128_8x64( vhash, vhashA, vhashB, dataLen<<3 );
+
+#else
+
+     dintrlv_4x128( hash0, hash1, hash2, hash3, vhashA, dataLen<<3 );
+     dintrlv_4x128( hash4, hash5, hash6, hash7, vhashB, dataLen<<3 );
+
+     echo_full( &ctx.echo, (BitSequence *)hash0, 512,
+                     (const BitSequence *)hash0, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash1, 512,
+                     (const BitSequence *)hash1, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash2, 512,
+                     (const BitSequence *)hash2, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash3, 512,
+                     (const BitSequence *)hash3, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash4, 512,
+                     (const BitSequence *)hash4, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash5, 512,
+                     (const BitSequence *)hash5, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash6, 512,
+                     (const BitSequence *)hash6, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash7, 512,
+                     (const BitSequence *)hash7, dataLen );
+     
+     intrlv_8x64( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+#endif
+
+     hamsi512_8way_init( &ctx.hamsi );
+     hamsi512_8way_update( &ctx.hamsi, vhash, dataLen );
+     hamsi512_8way_close( &ctx.hamsi, vhash );
+
+     dintrlv_8x64( hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7,
+                   vhash, dataLen<<3 );
+
+     fugue512_full( &ctx.fugue, hash0, hash0, dataLen );
+     fugue512_full( &ctx.fugue, hash1, hash1, dataLen );
+     fugue512_full( &ctx.fugue, hash2, hash2, dataLen );
+     fugue512_full( &ctx.fugue, hash3, hash3, dataLen );
+     fugue512_full( &ctx.fugue, hash4, hash4, dataLen );
+     fugue512_full( &ctx.fugue, hash5, hash5, dataLen );
+     fugue512_full( &ctx.fugue, hash6, hash6, dataLen );
+     fugue512_full( &ctx.fugue, hash7, hash7, dataLen );
+
+     intrlv_8x32( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+     shabal512_8way_init( &ctx.shabal );
+     shabal512_8way_update( &ctx.shabal, vhash, dataLen );
+     shabal512_8way_close( &ctx.shabal, vhash );
+
+     dintrlv_8x32( hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7,
+                   vhash, dataLen<<3 );
+
+     sph_whirlpool512_full( &ctx.whirlpool, hash0, hash0, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash1, hash1, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash2, hash2, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash3, hash3, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash4, hash4, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash5, hash5, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash6, hash6, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash7, hash7, dataLen );
+
+     intrlv_8x64( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+     sha512_8way_init( &ctx.sha512 );
+     sha512_8way_update( &ctx.sha512, vhash, dataLen );
+     sha512_8way_close( &ctx.sha512, vhash );
+
+     rintrlv_8x64_8x32( vhashA, vhash, dataLen<<3 );
+
+     haval256_5_8way_init( &ctx.haval );
+     haval256_5_8way_update( &ctx.haval, vhashA, dataLen );
+     haval256_5_8way_close( &ctx.haval, vhashA );
+
+     rintrlv_8x32_8x64( vhash, vhashA, dataLen<<3 );
+
+     memset( &vhash[ 4<<3 ], 0, (dataLen-32) << 3 );
+
+     blake512_8way_full( &ctx.blake, vhash, vhash, dataLen );
+
+     bmw512_8way_full( &ctx.bmw, vhash, vhash, dataLen );
+
+#if defined(__VAES__)
+
+     rintrlv_8x64_4x128( vhashA, vhashB, vhash, dataLen<<3 );
+
+     groestl512_4way_full( &ctx.groestl, vhashA, vhashA, dataLen );
+     groestl512_4way_full( &ctx.groestl, vhashB, vhashB, dataLen );
+
+     rintrlv_4x128_8x64( vhash, vhashA, vhashB, dataLen<<3 );
+
+#else
+
+     dintrlv_8x64( hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7,
+                   vhash, dataLen<<3 );
+
+     groestl512_full( &ctx.groestl, (char*)hash0, (char*)hash0, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash1, (char*)hash1, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash2, (char*)hash2, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash3, (char*)hash3, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash4, (char*)hash4, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash5, (char*)hash5, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash6, (char*)hash6, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash7, (char*)hash7, dataLen<<3 );
+
+     intrlv_8x64( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+#endif
+
+     skein512_8way_full( &ctx.skein, vhash, vhash, dataLen );
+
+     jh512_8way_init( &ctx.jh );
+     jh512_8way_update( &ctx.jh, vhash, dataLen );
+     jh512_8way_close( &ctx.jh, vhash );
+
+     keccak512_8way_init( &ctx.keccak );
+     keccak512_8way_update( &ctx.keccak, vhash, dataLen );
+     keccak512_8way_close( &ctx.keccak, vhash );
+
+     rintrlv_8x64_4x128( vhashA, vhashB, vhash, dataLen<<3 );
+
+     luffa512_4way_full( &ctx.luffa, vhashA, vhashA, dataLen );
+     luffa512_4way_full( &ctx.luffa, vhashB, vhashB, dataLen );
+
+     cube_4way_full( &ctx.cube, vhashA, 512, vhashA, dataLen );
+     cube_4way_full( &ctx.cube, vhashB, 512, vhashB, dataLen );
+
+#if defined(__VAES__)
+
+     shavite512_4way_full( &ctx.shavite, vhashA, vhashA, dataLen );
+     shavite512_4way_full( &ctx.shavite, vhashB, vhashB, dataLen );
+
+#else
+
+     dintrlv_4x128( hash0, hash1, hash2, hash3, vhashA, dataLen<<3 );
+     dintrlv_4x128( hash4, hash5, hash6, hash7, vhashB, dataLen<<3 );
+
+     shavite512_full( &ctx.shavite, hash0, hash0, dataLen );
+     shavite512_full( &ctx.shavite, hash1, hash1, dataLen );
+     shavite512_full( &ctx.shavite, hash2, hash2, dataLen );
+     shavite512_full( &ctx.shavite, hash3, hash3, dataLen );
+     shavite512_full( &ctx.shavite, hash4, hash4, dataLen );
+     shavite512_full( &ctx.shavite, hash5, hash5, dataLen );
+     shavite512_full( &ctx.shavite, hash6, hash6, dataLen );
+     shavite512_full( &ctx.shavite, hash7, hash7, dataLen );
+
+     intrlv_4x128( vhashA, hash0, hash1, hash2, hash3, dataLen<<3 );
+     intrlv_4x128( vhashB, hash4, hash5, hash6, hash7, dataLen<<3 );
+
+#endif
+
+     simd512_4way_full( &ctx.simd, vhashA, vhashA, dataLen );
+     simd512_4way_full( &ctx.simd, vhashB, vhashB, dataLen );
+
+#if defined(__VAES__)
+
+     echo_4way_full( &ctx.echo, vhashA, 512, vhashA, dataLen );
+     echo_4way_full( &ctx.echo, vhashB, 512, vhashB, dataLen );
+
+     rintrlv_4x128_8x64( vhash, vhashA, vhashB, dataLen<<3 );
+
+#else
+
+     dintrlv_4x128( hash0, hash1, hash2, hash3, vhashA, dataLen<<3 );
+     dintrlv_4x128( hash4, hash5, hash6, hash7, vhashB, dataLen<<3 );
+
+     echo_full( &ctx.echo, (BitSequence *)hash0, 512,
+                     (const BitSequence *)hash0, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash1, 512,
+                     (const BitSequence *)hash1, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash2, 512,
+                     (const BitSequence *)hash2, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash3, 512,
+                     (const BitSequence *)hash3, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash4, 512,
+                     (const BitSequence *)hash4, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash5, 512,
+                     (const BitSequence *)hash5, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash6, 512,
+                     (const BitSequence *)hash6, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash7, 512,
+                     (const BitSequence *)hash7, dataLen );
+
+     intrlv_8x64( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+#endif
+
+     hamsi512_8way_init( &ctx.hamsi );
+     hamsi512_8way_update( &ctx.hamsi, vhash, dataLen );
+     hamsi512_8way_close( &ctx.hamsi, vhash );
+
+     dintrlv_8x64( hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7,
+                   vhash, dataLen<<3 );
+
+     fugue512_full( &ctx.fugue, hash0, hash0, dataLen );
+     fugue512_full( &ctx.fugue, hash1, hash1, dataLen );
+     fugue512_full( &ctx.fugue, hash2, hash2, dataLen );
+     fugue512_full( &ctx.fugue, hash3, hash3, dataLen );
+     fugue512_full( &ctx.fugue, hash4, hash4, dataLen );
+     fugue512_full( &ctx.fugue, hash5, hash5, dataLen );
+     fugue512_full( &ctx.fugue, hash6, hash6, dataLen );
+     fugue512_full( &ctx.fugue, hash7, hash7, dataLen );
+
+     intrlv_8x32( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+     shabal512_8way_init( &ctx.shabal );
+     shabal512_8way_update( &ctx.shabal, vhash, dataLen );
+     shabal512_8way_close( &ctx.shabal, vhash );
+
+     dintrlv_8x32( hash0, hash1, hash2, hash3, hash4, hash5, hash6, hash7,
+                   vhash, dataLen<<3 );
+
+     sph_whirlpool512_full( &ctx.whirlpool, hash0, hash0, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash1, hash1, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash2, hash2, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash3, hash3, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash4, hash4, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash5, hash5, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash6, hash6, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash7, hash7, dataLen );
+
+     intrlv_8x64( vhash, hash0, hash1, hash2, hash3, hash4, hash5, hash6,
+                  hash7, dataLen<<3 );
+
+     sha512_8way_init( &ctx.sha512 );
+     sha512_8way_update( &ctx.sha512, vhash, dataLen );
+     sha512_8way_close( &ctx.sha512, vhash );
+
+     rintrlv_8x64_8x32( vhashA, vhash, dataLen<<3 );
+
+     haval256_5_8way_init( &ctx.haval );
+     haval256_5_8way_update( &ctx.haval, vhashA, dataLen );
+     haval256_5_8way_close( &ctx.haval, output );
+
+     return 1;
 }
 
-void xevan_4way_hash( void *output, const void *input )
+#elif defined(XEVAN_4WAY)
+
+union _xevan_4way_context_overlay
+{
+	blake512_4way_context   blake;
+        bmw512_4way_context     bmw;
+#if defined(__VAES__)
+        groestl512_2way_context groestl;
+        echo_2way_context       echo;
+#else
+	hashState_groestl       groestl;
+        hashState_echo          echo;
+#endif
+	skein512_4way_context   skein;
+        jh512_4way_context      jh;
+        keccak512_4way_context  keccak;
+        luffa_2way_context      luffa;
+        cube_2way_context       cube;
+        shavite512_2way_context shavite;
+        simd_2way_context       simd;
+        hamsi512_4way_context   hamsi;
+        hashState_fugue         fugue;
+        shabal512_4way_context  shabal;
+        sph_whirlpool_context   whirlpool;
+        sha512_4way_context     sha512;
+        haval256_5_4way_context haval;
+};
+typedef union _xevan_4way_context_overlay xevan_4way_context_overlay;
+
+int xevan_4way_hash( void *output, const void *input, int thr_id )
 {
      uint64_t hash0[16] __attribute__ ((aligned (64)));
      uint64_t hash1[16] __attribute__ ((aligned (64)));
      uint64_t hash2[16] __attribute__ ((aligned (64)));
      uint64_t hash3[16] __attribute__ ((aligned (64)));
      uint64_t vhash[16<<2] __attribute__ ((aligned (64)));
+     uint64_t vhashA[16<<2] __attribute__ ((aligned (64)));
+     uint64_t vhashB[16<<2] __attribute__ ((aligned (64)));
      const int dataLen = 128;
-     const int midlen = 64;            // bytes
-     const int tail   = 80 - midlen;   // 16
-     xevan_4way_ctx_holder ctx __attribute__ ((aligned (64)));
-     memcpy( &ctx, &xevan_4way_ctx, sizeof(xevan_4way_ctx) );
+     xevan_4way_context_overlay ctx __attribute__ ((aligned (64)));
 
-     memcpy( &ctx.blake, &xevan_blake_4way_mid,
-             sizeof(xevan_blake_4way_mid) );
-     blake512_4way( &ctx.blake, input + (midlen<<2), tail );
-     blake512_4way_close(&ctx.blake, vhash);
-
+     blake512_4way_full( &ctx.blake, vhash, input, 80 );
      memset( &vhash[8<<2], 0, 64<<2 );
-     mm256_deinterleave_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
 
-     sph_bmw512( &ctx.bmw, hash0, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash0 );
-     memcpy( &ctx.bmw, &xevan_4way_ctx.bmw, sizeof(sph_bmw512_context) );
-     sph_bmw512( &ctx.bmw, hash1, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash1 );
-     memcpy( &ctx.bmw, &xevan_4way_ctx.bmw, sizeof(sph_bmw512_context) );
-     sph_bmw512( &ctx.bmw, hash2, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash2 );
-     memcpy( &ctx.bmw, &xevan_4way_ctx.bmw, sizeof(sph_bmw512_context) );
-     sph_bmw512( &ctx.bmw, hash3, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash3 );
+     bmw512_4way_init( &ctx.bmw );
+     bmw512_4way_update( &ctx.bmw, vhash, dataLen );
+     bmw512_4way_close( &ctx.bmw, vhash );
 
-     update_and_final_groestl( &ctx.groestl, (char*)hash0, (char*)hash0,
-                               dataLen<<3 );
-     memcpy( &ctx.groestl, &xevan_4way_ctx.groestl, sizeof(hashState_groestl) );
-     update_and_final_groestl( &ctx.groestl, (char*)hash1, (char*)hash1,
-                               dataLen<<3 );
-     memcpy( &ctx.groestl, &xevan_4way_ctx.groestl, sizeof(hashState_groestl) );
-     update_and_final_groestl( &ctx.groestl, (char*)hash2, (char*)hash2,
-                               dataLen<<3 );
-     memcpy( &ctx.groestl, &xevan_4way_ctx.groestl, sizeof(hashState_groestl) );
-     update_and_final_groestl( &ctx.groestl, (char*)hash3, (char*)hash3,
-                               dataLen<<3 );
+#if defined(__VAES__)
 
-     mm256_interleave_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+     rintrlv_4x64_2x128( vhashA, vhashB, vhash, dataLen<<3 );
 
-     skein512_4way( &ctx.skein, vhash, dataLen );
-     skein512_4way_close( &ctx.skein, vhash );
+     groestl512_2way_full( &ctx.groestl, vhashA, vhashA, dataLen );
+     groestl512_2way_full( &ctx.groestl, vhashB, vhashB, dataLen );
 
-     jh512_4way( &ctx.jh, vhash, dataLen );
+     rintrlv_2x128_4x64( vhash, vhashA, vhashB, dataLen<<3 );
+
+#else
+     
+     dintrlv_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+
+     groestl512_full( &ctx.groestl, (char*)hash0, (char*)hash0, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash1, (char*)hash1, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash2, (char*)hash2, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash3, (char*)hash3, dataLen<<3 );
+
+     intrlv_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+
+#endif
+
+     skein512_4way_full( &ctx.skein, vhash, vhash, dataLen );
+
+     jh512_4way_init( &ctx.jh );
+     jh512_4way_update( &ctx.jh, vhash, dataLen );
      jh512_4way_close( &ctx.jh, vhash );
 
-     keccak512_4way( &ctx.keccak, vhash, dataLen );
+     keccak512_4way_init( &ctx.keccak );
+     keccak512_4way_update( &ctx.keccak, vhash, dataLen );
      keccak512_4way_close( &ctx.keccak, vhash );
 
-     mm256_deinterleave_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+     rintrlv_4x64_2x128( vhashA, vhashB, vhash, dataLen<<3 );
 
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash0,
-                             (const BitSequence*)hash0, dataLen );
-     memcpy( &ctx.luffa, &xevan_4way_ctx.luffa, sizeof(hashState_luffa) );
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash1,
-                             (const BitSequence*)hash1, dataLen );
-     memcpy( &ctx.luffa, &xevan_4way_ctx.luffa, sizeof(hashState_luffa) );
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash2,
-                             (const BitSequence*)hash2, dataLen );
-     memcpy( &ctx.luffa, &xevan_4way_ctx.luffa, sizeof(hashState_luffa) );
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash3,
-                             (const BitSequence*)hash3, dataLen );
+     luffa512_2way_full( &ctx.luffa, vhashA, vhashA, dataLen );
+     luffa512_2way_full( &ctx.luffa, vhashB, vhashB, dataLen );
 
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash0, (const byte*) hash0,
-                           dataLen );
-     memcpy( &ctx.cube, &xevan_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash1, (const byte*) hash1,
-                           dataLen );
-     memcpy( &ctx.cube, &xevan_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash2, (const byte*) hash2,
-                           dataLen );
-     memcpy( &ctx.cube, &xevan_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash3, (const byte*) hash3,
-                           dataLen );
+     cube_2way_full( &ctx.cube, vhashA, 512, vhashA, dataLen );
+     cube_2way_full( &ctx.cube, vhashB, 512, vhashB, dataLen );
 
-     sph_shavite512( &ctx.shavite, hash0, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash0 );
-     memcpy( &ctx.shavite, &xevan_4way_ctx.shavite,
-             sizeof(sph_shavite512_context) );
-     sph_shavite512( &ctx.shavite, hash1, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash1 );
-     memcpy( &ctx.shavite, &xevan_4way_ctx.shavite,
-             sizeof(sph_shavite512_context) );
-     sph_shavite512( &ctx.shavite, hash2, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash2 );
-     memcpy( &ctx.shavite, &xevan_4way_ctx.shavite,
-             sizeof(sph_shavite512_context) );
-     sph_shavite512( &ctx.shavite, hash3, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash3 );
+     shavite512_2way_full( &ctx.shavite, vhashA, vhashA, dataLen );
+     shavite512_2way_full( &ctx.shavite, vhashB, vhashB, dataLen );
 
-     update_final_sd( &ctx.simd, (BitSequence *)hash0,
-                      (const BitSequence *)hash0, dataLen<<3 );
-     memcpy( &ctx.simd, &xevan_4way_ctx.simd, sizeof(hashState_sd) );
-     update_final_sd( &ctx.simd, (BitSequence *)hash1,
-                      (const BitSequence *)hash1, dataLen<<3  );
-     memcpy( &ctx.simd, &xevan_4way_ctx.simd, sizeof(hashState_sd) );
-     update_final_sd( &ctx.simd, (BitSequence *)hash2,
-                      (const BitSequence *)hash2, dataLen<<3  );
-     memcpy( &ctx.simd, &xevan_4way_ctx.simd, sizeof(hashState_sd) );
-     update_final_sd( &ctx.simd, (BitSequence *)hash3,
-                      (const BitSequence *)hash3, dataLen<<3  );
+     simd512_2way_full( &ctx.simd, vhashA, vhashA, dataLen );
+     simd512_2way_full( &ctx.simd, vhashB, vhashB, dataLen );
 
-     update_final_echo( &ctx.echo, (BitSequence *)hash0,
-                       (const BitSequence *) hash0, dataLen<<3 );
-     memcpy( &ctx.echo, &xevan_4way_ctx.echo, sizeof(hashState_echo) );
-     update_final_echo( &ctx.echo, (BitSequence *)hash1,
-                       (const BitSequence *) hash1, dataLen<<3 );
-     memcpy( &ctx.echo, &xevan_4way_ctx.echo, sizeof(hashState_echo) );
-     update_final_echo( &ctx.echo, (BitSequence *)hash2,
-                       (const BitSequence *) hash2, dataLen<<3 );
-     memcpy( &ctx.echo, &xevan_4way_ctx.echo, sizeof(hashState_echo) );
-     update_final_echo( &ctx.echo, (BitSequence *)hash3,
-                       (const BitSequence *) hash3, dataLen<<3 );
+#if defined(__VAES__)
 
-     sph_hamsi512( &ctx.hamsi, hash0, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash0 );
-     memcpy( &ctx.hamsi, &xevan_4way_ctx.hamsi, sizeof(sph_hamsi512_context) );
-     sph_hamsi512( &ctx.hamsi, hash1, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash1 );
-     memcpy( &ctx.hamsi, &xevan_4way_ctx.hamsi, sizeof(sph_hamsi512_context) );
-     sph_hamsi512( &ctx.hamsi, hash2, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash2 );
-     memcpy( &ctx.hamsi, &xevan_4way_ctx.hamsi, sizeof(sph_hamsi512_context) );
-     sph_hamsi512( &ctx.hamsi, hash3, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash3 );
+     echo_2way_full( &ctx.echo, vhashA, 512, vhashA, dataLen );
+     echo_2way_full( &ctx.echo, vhashB, 512, vhashB, dataLen );
 
-     sph_fugue512( &ctx.fugue, hash0, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash0 );
-     memcpy( &ctx.fugue, &xevan_4way_ctx.fugue, sizeof(sph_fugue512_context) );
-     sph_fugue512( &ctx.fugue, hash1, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash1 );
-     memcpy( &ctx.fugue, &xevan_4way_ctx.fugue, sizeof(sph_fugue512_context) );
-     sph_fugue512( &ctx.fugue, hash2, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash2 );
-     memcpy( &ctx.fugue, &xevan_4way_ctx.fugue, sizeof(sph_fugue512_context) );
-     sph_fugue512( &ctx.fugue, hash3, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash3 );
+     rintrlv_2x128_4x64( vhash, vhashA, vhashB, dataLen<<3 );
 
-     sph_shabal512( &ctx.shabal, hash0, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash0 );
-     memcpy( &ctx.shabal, &xevan_4way_ctx.shabal, 
-             sizeof(sph_shabal512_context) );
-     sph_shabal512( &ctx.shabal, hash1, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash1 );
-     memcpy( &ctx.shabal, &xevan_4way_ctx.shabal,
-             sizeof(sph_shabal512_context) );
-     sph_shabal512( &ctx.shabal, hash2, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash2 );
-     memcpy( &ctx.shabal, &xevan_4way_ctx.shabal,
-             sizeof(sph_shabal512_context) );
-     sph_shabal512( &ctx.shabal, hash3, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash3 );
+#else
+     
+     dintrlv_2x128( hash0, hash1, vhashA, dataLen<<3 );
+     dintrlv_2x128( hash2, hash3, vhashB, dataLen<<3 );
 
-     sph_whirlpool( &ctx.whirlpool, hash0, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash0 );
-     memcpy( &ctx.whirlpool, &xevan_4way_ctx.whirlpool,
-             sizeof(sph_whirlpool_context) );
-     sph_whirlpool( &ctx.whirlpool, hash1, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash1 );
-     memcpy( &ctx.whirlpool, &xevan_4way_ctx.whirlpool,
-             sizeof(sph_whirlpool_context) );
-     sph_whirlpool( &ctx.whirlpool, hash2, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash2 );
-     memcpy( &ctx.whirlpool, &xevan_4way_ctx.whirlpool,
-             sizeof(sph_whirlpool_context) );
-     sph_whirlpool( &ctx.whirlpool, hash3, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash3 );
+     echo_full( &ctx.echo, (BitSequence *)hash0, 512,
+                     (const BitSequence *)hash0, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash1, 512,
+                     (const BitSequence *)hash1, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash2, 512,
+                     (const BitSequence *)hash2, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash3, 512,
+                     (const BitSequence *)hash3, dataLen );
 
-     SHA512_Update( &ctx.sha512, hash0, dataLen );
-     SHA512_Final( (unsigned char*)hash0, &ctx.sha512 );
-     memcpy( &ctx.sha512, &xevan_4way_ctx.sha512, sizeof(SHA512_CTX) );
-     SHA512_Update( &ctx.sha512, hash1, dataLen );
-     SHA512_Final( (unsigned char*)hash1, &ctx.sha512 );
-     memcpy( &ctx.sha512, &xevan_4way_ctx.sha512, sizeof(SHA512_CTX) );
-     SHA512_Update( &ctx.sha512, hash2, dataLen );
-     SHA512_Final( (unsigned char*)hash2, &ctx.sha512 );
-     memcpy( &ctx.sha512, &xevan_4way_ctx.sha512, sizeof(SHA512_CTX) );
-     SHA512_Update( &ctx.sha512, hash3, dataLen );
-     SHA512_Final( (unsigned char*)hash3, &ctx.sha512 );
+     intrlv_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
 
-     sph_haval256_5( &ctx.haval, (const void*)hash0, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash0 );
-     memcpy( &ctx.haval, &xevan_4way_ctx.haval,
-             sizeof(sph_haval256_5_context) );
-     sph_haval256_5( &ctx.haval, (const void*)hash1, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash1 );
-     memcpy( &ctx.haval, &xevan_4way_ctx.haval,
-             sizeof(sph_haval256_5_context) );
-     sph_haval256_5( &ctx.haval, (const void*)hash2, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash2 );
-     memcpy( &ctx.haval, &xevan_4way_ctx.haval,
-             sizeof(sph_haval256_5_context) );
-     sph_haval256_5( &ctx.haval, (const void*)hash3, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash3 );
+#endif
 
-     mm256_interleave_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+     hamsi512_4way_init( &ctx.hamsi );
+     hamsi512_4way_update( &ctx.hamsi, vhash, dataLen );
+     hamsi512_4way_close( &ctx.hamsi, vhash );
+
+     dintrlv_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+
+     fugue512_full( &ctx.fugue, hash0, hash0, dataLen );
+     fugue512_full( &ctx.fugue, hash1, hash1, dataLen );
+     fugue512_full( &ctx.fugue, hash2, hash2, dataLen );
+     fugue512_full( &ctx.fugue, hash3, hash3, dataLen );
+
+     // Parallel 4way 32 bit
+     intrlv_4x32( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+
+     shabal512_4way_init( &ctx.shabal );
+     shabal512_4way_update( &ctx.shabal, vhash, dataLen );
+     shabal512_4way_close( &ctx.shabal, vhash );
+
+     dintrlv_4x32( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+
+     // Serial
+     sph_whirlpool512_full( &ctx.whirlpool, hash0, hash0, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash1, hash1, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash2, hash2, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash3, hash3, dataLen );
+
+     intrlv_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+
+     sha512_4way_init( &ctx.sha512 );
+     sha512_4way_update( &ctx.sha512, vhash, dataLen );
+     sha512_4way_close( &ctx.sha512, vhash );
+
+     rintrlv_4x64_4x32( vhashA, vhash, dataLen<<3 );
+
+     haval256_5_4way_init( &ctx.haval );
+     haval256_5_4way_update( &ctx.haval, vhashA, dataLen );
+     haval256_5_4way_close( &ctx.haval, vhashA );
+
+     rintrlv_4x32_4x64( vhash, vhashA, dataLen<<3 );
+
      memset( &vhash[ 4<<2 ], 0, (dataLen-32) << 2 );
-     memcpy( &ctx, &xevan_4way_ctx, sizeof(xevan_4way_ctx) );
 
-     blake512_4way( &ctx.blake, vhash, dataLen );
+     blake512_4way_init( &ctx.blake );
+     blake512_4way_update( &ctx.blake, vhash, dataLen );
      blake512_4way_close(&ctx.blake, vhash);
 
-     mm256_deinterleave_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+     bmw512_4way_init( &ctx.bmw );
+     bmw512_4way_update( &ctx.bmw, vhash, dataLen );
+     bmw512_4way_close( &ctx.bmw, vhash );
 
-     sph_bmw512( &ctx.bmw, hash0, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash0 );
-     memcpy( &ctx.bmw, &xevan_4way_ctx.bmw, sizeof(sph_bmw512_context) );
-     sph_bmw512( &ctx.bmw, hash1, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash1 );
-     memcpy( &ctx.bmw, &xevan_4way_ctx.bmw, sizeof(sph_bmw512_context) );
-     sph_bmw512( &ctx.bmw, hash2, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash2 );
-     memcpy( &ctx.bmw, &xevan_4way_ctx.bmw, sizeof(sph_bmw512_context) );
-     sph_bmw512( &ctx.bmw, hash3, dataLen );
-     sph_bmw512_close( &ctx.bmw, hash3 );
+#if defined(__VAES__)
 
-     update_and_final_groestl( &ctx.groestl, (char*)hash0, (char*)hash0,
-                               dataLen<<3 );
-     memcpy( &ctx.groestl, &xevan_4way_ctx.groestl, sizeof(hashState_groestl) );
-     update_and_final_groestl( &ctx.groestl, (char*)hash1, (char*)hash1,
-                               dataLen<<3 );
-     memcpy( &ctx.groestl, &xevan_4way_ctx.groestl, sizeof(hashState_groestl) );
-     update_and_final_groestl( &ctx.groestl, (char*)hash2, (char*)hash2,
-                               dataLen<<3 );
-     memcpy( &ctx.groestl, &xevan_4way_ctx.groestl, sizeof(hashState_groestl) );
-     update_and_final_groestl( &ctx.groestl, (char*)hash3, (char*)hash3,
-                               dataLen<<3 );
+     rintrlv_4x64_2x128( vhashA, vhashB, vhash, dataLen<<3 );
 
-     mm256_interleave_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+     groestl512_2way_full( &ctx.groestl, vhashA, vhashA, dataLen );
+     groestl512_2way_full( &ctx.groestl, vhashB, vhashB, dataLen );
 
-     skein512_4way( &ctx.skein, vhash, dataLen );
-     skein512_4way_close( &ctx.skein, vhash );
+     rintrlv_2x128_4x64( vhash, vhashA, vhashB, dataLen<<3 );
 
-     jh512_4way( &ctx.jh, vhash, dataLen );
+#else
+
+     dintrlv_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+
+     groestl512_full( &ctx.groestl, (char*)hash0, (char*)hash0, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash1, (char*)hash1, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash2, (char*)hash2, dataLen<<3 );
+     groestl512_full( &ctx.groestl, (char*)hash3, (char*)hash3, dataLen<<3 );
+
+     intrlv_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
+
+#endif
+
+     skein512_4way_full( &ctx.skein, vhash, vhash, dataLen );
+
+     jh512_4way_init( &ctx.jh );
+     jh512_4way_update( &ctx.jh, vhash, dataLen );
      jh512_4way_close( &ctx.jh, vhash );
 
-     keccak512_4way( &ctx.keccak, vhash, dataLen );
+     keccak512_4way_init( &ctx.keccak );
+     keccak512_4way_update( &ctx.keccak, vhash, dataLen );
      keccak512_4way_close( &ctx.keccak, vhash );
 
-     mm256_deinterleave_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
+     rintrlv_4x64_2x128( vhashA, vhashB, vhash, dataLen<<3 );
 
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash0,
-                             (const BitSequence*)hash0, dataLen );
-     memcpy( &ctx.luffa, &xevan_4way_ctx.luffa, sizeof(hashState_luffa) );
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash1,
-                             (const BitSequence*)hash1, dataLen );
-     memcpy( &ctx.luffa, &xevan_4way_ctx.luffa, sizeof(hashState_luffa) );
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash2,
-                             (const BitSequence*)hash2, dataLen );
-     memcpy( &ctx.luffa, &xevan_4way_ctx.luffa, sizeof(hashState_luffa) );
-     update_and_final_luffa( &ctx.luffa, (BitSequence*)hash3,
-                             (const BitSequence*)hash3, dataLen );
+     luffa512_2way_full( &ctx.luffa, vhashA, vhashA, dataLen );
+     luffa512_2way_full( &ctx.luffa, vhashB, vhashB, dataLen );
 
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash0, (const byte*) hash0,
-                           dataLen );
-     memcpy( &ctx.cube, &xevan_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash1, (const byte*) hash1,
-                           dataLen );
-     memcpy( &ctx.cube, &xevan_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash2, (const byte*) hash2,
-                           dataLen );
-     memcpy( &ctx.cube, &xevan_4way_ctx.cube, sizeof(cubehashParam) );
-     cubehashUpdateDigest( &ctx.cube, (byte*)hash3, (const byte*) hash3,
-                           dataLen );
+     cube_2way_full( &ctx.cube, vhashA, 512, vhashA, dataLen );
+     cube_2way_full( &ctx.cube, vhashB, 512, vhashB, dataLen );
 
-     sph_shavite512( &ctx.shavite, hash0, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash0 );
-     memcpy( &ctx.shavite, &xevan_4way_ctx.shavite,
-             sizeof(sph_shavite512_context) );
-     sph_shavite512( &ctx.shavite, hash1, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash1 );
-     memcpy( &ctx.shavite, &xevan_4way_ctx.shavite,
-             sizeof(sph_shavite512_context) );
-     sph_shavite512( &ctx.shavite, hash2, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash2 );
-     memcpy( &ctx.shavite, &xevan_4way_ctx.shavite,
-             sizeof(sph_shavite512_context) );
-     sph_shavite512( &ctx.shavite, hash3, dataLen );
-     sph_shavite512_close( &ctx.shavite, hash3 );
+     shavite512_2way_full( &ctx.shavite, vhashA, vhashA, dataLen );
+     shavite512_2way_full( &ctx.shavite, vhashB, vhashB, dataLen );
 
-     update_final_sd( &ctx.simd, (BitSequence *)hash0,
-                      (const BitSequence *)hash0, dataLen<<3 );
-     memcpy( &ctx.simd, &xevan_4way_ctx.simd, sizeof(hashState_sd) );
-     update_final_sd( &ctx.simd, (BitSequence *)hash1,
-                      (const BitSequence *)hash1, dataLen<<3  );
-     memcpy( &ctx.simd, &xevan_4way_ctx.simd, sizeof(hashState_sd) );
-     update_final_sd( &ctx.simd, (BitSequence *)hash2,
-                      (const BitSequence *)hash2, dataLen<<3  );
-     memcpy( &ctx.simd, &xevan_4way_ctx.simd, sizeof(hashState_sd) );
-     update_final_sd( &ctx.simd, (BitSequence *)hash3,
-                      (const BitSequence *)hash3, dataLen<<3  );
+     simd512_2way_full( &ctx.simd, vhashA, vhashA, dataLen );
+     simd512_2way_full( &ctx.simd, vhashB, vhashB, dataLen );
 
-     update_final_echo( &ctx.echo, (BitSequence *)hash0,
-                       (const BitSequence *) hash0, dataLen<<3 );
-     memcpy( &ctx.echo, &xevan_4way_ctx.echo, sizeof(hashState_echo) );
-     update_final_echo( &ctx.echo, (BitSequence *)hash1,
-                       (const BitSequence *) hash1, dataLen<<3 );
-     memcpy( &ctx.echo, &xevan_4way_ctx.echo, sizeof(hashState_echo) );
-     update_final_echo( &ctx.echo, (BitSequence *)hash2,
-                       (const BitSequence *) hash2, dataLen<<3 );
-     memcpy( &ctx.echo, &xevan_4way_ctx.echo, sizeof(hashState_echo) );
-     update_final_echo( &ctx.echo, (BitSequence *)hash3,
-                       (const BitSequence *) hash3, dataLen<<3 );
+#if defined(__VAES__)
 
-     sph_hamsi512( &ctx.hamsi, hash0, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash0 );
-     memcpy( &ctx.hamsi, &xevan_4way_ctx.hamsi, sizeof(sph_hamsi512_context) );
-     sph_hamsi512( &ctx.hamsi, hash1, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash1 );
-     memcpy( &ctx.hamsi, &xevan_4way_ctx.hamsi, sizeof(sph_hamsi512_context) );
-     sph_hamsi512( &ctx.hamsi, hash2, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash2 );
-     memcpy( &ctx.hamsi, &xevan_4way_ctx.hamsi, sizeof(sph_hamsi512_context) );
-     sph_hamsi512( &ctx.hamsi, hash3, dataLen );
-     sph_hamsi512_close( &ctx.hamsi, hash3 );
+     echo_2way_full( &ctx.echo, vhashA, 512, vhashA, dataLen );
+     echo_2way_full( &ctx.echo, vhashB, 512, vhashB, dataLen );
 
-     sph_fugue512( &ctx.fugue, hash0, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash0 );
-     memcpy( &ctx.fugue, &xevan_4way_ctx.fugue, sizeof(sph_fugue512_context) );
-     sph_fugue512( &ctx.fugue, hash1, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash1 );
-     memcpy( &ctx.fugue, &xevan_4way_ctx.fugue, sizeof(sph_fugue512_context) );
-     sph_fugue512( &ctx.fugue, hash2, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash2 );
-     memcpy( &ctx.fugue, &xevan_4way_ctx.fugue, sizeof(sph_fugue512_context) );
-     sph_fugue512( &ctx.fugue, hash3, dataLen );
-     sph_fugue512_close( &ctx.fugue, hash3 );
+     rintrlv_2x128_4x64( vhash, vhashA, vhashB, dataLen<<3 );
 
-     sph_shabal512( &ctx.shabal, hash0, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash0 );
-     memcpy( &ctx.shabal, &xevan_4way_ctx.shabal,
-             sizeof(sph_shabal512_context) );
-     sph_shabal512( &ctx.shabal, hash1, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash1 );
-     memcpy( &ctx.shabal, &xevan_4way_ctx.shabal,
-             sizeof(sph_shabal512_context) );
-     sph_shabal512( &ctx.shabal, hash2, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash2 );
-     memcpy( &ctx.shabal, &xevan_4way_ctx.shabal,
-             sizeof(sph_shabal512_context) );
-     sph_shabal512( &ctx.shabal, hash3, dataLen );
-     sph_shabal512_close( &ctx.shabal, hash3 );
+#else
 
-     sph_whirlpool( &ctx.whirlpool, hash0, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash0 );
-     memcpy( &ctx.whirlpool, &xevan_4way_ctx.whirlpool,
-             sizeof(sph_whirlpool_context) );
-     sph_whirlpool( &ctx.whirlpool, hash1, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash1 );
-     memcpy( &ctx.whirlpool, &xevan_4way_ctx.whirlpool,
-             sizeof(sph_whirlpool_context) );
-     sph_whirlpool( &ctx.whirlpool, hash2, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash2 );
-     memcpy( &ctx.whirlpool, &xevan_4way_ctx.whirlpool,
-             sizeof(sph_whirlpool_context) );
-     sph_whirlpool( &ctx.whirlpool, hash3, dataLen );
-     sph_whirlpool_close( &ctx.whirlpool, hash3 );
+     dintrlv_2x128( hash0, hash1, vhashA, dataLen<<3 );
+     dintrlv_2x128( hash2, hash3, vhashB, dataLen<<3 );
 
-     SHA512_Update( &ctx.sha512, hash0, dataLen );
-     SHA512_Final( (unsigned char*)hash0, &ctx.sha512 );
-     memcpy( &ctx.sha512, &xevan_4way_ctx.sha512, sizeof(SHA512_CTX) );
-     SHA512_Update( &ctx.sha512, hash1, dataLen );
-     SHA512_Final( (unsigned char*)hash1, &ctx.sha512 );
-     memcpy( &ctx.sha512, &xevan_4way_ctx.sha512, sizeof(SHA512_CTX) );
-     SHA512_Update( &ctx.sha512, hash2, dataLen );
-     SHA512_Final( (unsigned char*)hash2, &ctx.sha512 );
-     memcpy( &ctx.sha512, &xevan_4way_ctx.sha512, sizeof(SHA512_CTX) );
-     SHA512_Update( &ctx.sha512, hash3, dataLen );
-     SHA512_Final( (unsigned char*)hash3, &ctx.sha512 );
+     echo_full( &ctx.echo, (BitSequence *)hash0, 512,
+                     (const BitSequence *)hash0, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash1, 512,
+                     (const BitSequence *)hash1, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash2, 512,
+                     (const BitSequence *)hash2, dataLen );
+     echo_full( &ctx.echo, (BitSequence *)hash3, 512,
+                     (const BitSequence *)hash3, dataLen );
 
-     sph_haval256_5( &ctx.haval, (const void*)hash0, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash0 );
-     memcpy( &ctx.haval, &xevan_4way_ctx.haval,
-             sizeof(sph_haval256_5_context) );
-     sph_haval256_5( &ctx.haval, (const void*)hash1, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash1 );
-     memcpy( &ctx.haval, &xevan_4way_ctx.haval,
-             sizeof(sph_haval256_5_context) );
-     sph_haval256_5( &ctx.haval, (const void*)hash2, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash2 );
-     memcpy( &ctx.haval, &xevan_4way_ctx.haval,
-             sizeof(sph_haval256_5_context) );
-     sph_haval256_5( &ctx.haval, (const void*)hash3, dataLen );
-     sph_haval256_5_close( &ctx.haval, hash3 );
+     intrlv_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
 
-     memcpy( output,    hash0, 32 );
-     memcpy( output+32, hash1, 32 );
-     memcpy( output+64, hash2, 32 );
-     memcpy( output+96, hash3, 32 );
-}
+#endif
 
-int scanhash_xevan_4way( int thr_id, struct work *work, uint32_t max_nonce,
-                         uint64_t *hashes_done )
-{
-   uint32_t hash[4*8] __attribute__ ((aligned (64)));
-   uint32_t vdata[24*4] __attribute__ ((aligned (64)));
-//	uint32_t _ALIGN(64) hash[8];
-   uint32_t _ALIGN(64) endiandata[20];
-   uint32_t *pdata = work->data;
-   uint32_t *ptarget = work->target;
+     hamsi512_4way_init( &ctx.hamsi );
+     hamsi512_4way_update( &ctx.hamsi, vhash, dataLen );
+     hamsi512_4way_close( &ctx.hamsi, vhash );
 
-   const uint32_t Htarg = ptarget[7];
-   const uint32_t first_nonce = pdata[19];
-   uint32_t n = first_nonce;
-   uint32_t *nonces = work->nonces;
-   bool *found = work->nfound;
-   int num_found = 0;
-   uint32_t *noncep0 = vdata + 73;   // 9*8 + 1
-   uint32_t *noncep1 = vdata + 75;
-   uint32_t *noncep2 = vdata + 77;
-   uint32_t *noncep3 = vdata + 79;
+     dintrlv_4x64( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
 
-   if ( opt_benchmark )
-      ptarget[7] = 0x0cff;
+     fugue512_full( &ctx.fugue, hash0, hash0, dataLen );
+     fugue512_full( &ctx.fugue, hash1, hash1, dataLen );
+     fugue512_full( &ctx.fugue, hash2, hash2, dataLen );
+     fugue512_full( &ctx.fugue, hash3, hash3, dataLen );
 
-   for ( int k=0; k < 19; k++ )
-      be32enc( &endiandata[k], pdata[k] );
+     intrlv_4x32( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
 
-   uint64_t *edata = (uint64_t*)endiandata;
-   mm256_interleave_4x64( (uint64_t*)vdata, edata, edata, edata, edata, 640 );
+     shabal512_4way_init( &ctx.shabal );
+     shabal512_4way_update( &ctx.shabal, vhash, dataLen );
+     shabal512_4way_close( &ctx.shabal, vhash );
 
-   xevan_4way_blake512_midstate( vdata );
+     dintrlv_4x32( hash0, hash1, hash2, hash3, vhash, dataLen<<3 );
 
-   do {
-      found[0] = found[1] = found[2] = found[3] = false;
-      be32enc( noncep0, n   );
-      be32enc( noncep1, n+1 );
-      be32enc( noncep2, n+2 );
-      be32enc( noncep3, n+3 );
+     sph_whirlpool512_full( &ctx.whirlpool, hash0, hash0, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash1, hash1, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash2, hash2, dataLen );
+     sph_whirlpool512_full( &ctx.whirlpool, hash3, hash3, dataLen );
 
-      xevan_4way_hash( hash, vdata );
+     intrlv_4x64( vhash, hash0, hash1, hash2, hash3, dataLen<<3 );
 
-      pdata[19] = n;
+     sha512_4way_init( &ctx.sha512 );
+     sha512_4way_update( &ctx.sha512, vhash, dataLen );
+     sha512_4way_close( &ctx.sha512, vhash );
 
-      if ( ( hash[7] <= Htarg ) && fulltest( hash, ptarget ) )
-      {
-         found[0] = true;
-         num_found++;
-         nonces[0] = n;
-         work_set_target_ratio( work, hash );
-      }
-      if ( ( (hash+8)[7] <= Htarg ) && fulltest( hash+8, ptarget ) )
-      {
-         found[1] = true;
-         num_found++;
-         nonces[1] = n+1;
-         work_set_target_ratio( work, hash+8 );
-      }
-      if ( ( (hash+16)[7] <= Htarg ) && fulltest( hash+16, ptarget ) )
-      {
-         found[2] = true;
-         num_found++;
-         nonces[2] = n+2;
-         work_set_target_ratio( work, hash+16 );
-      }
-      if ( ( (hash+24)[7] <= Htarg ) && fulltest( hash+24, ptarget ) )
-      {
-         found[3] = true;
-         num_found++;
-         nonces[3] = n+3;
-         work_set_target_ratio( work, hash+24 );
-      }
-      n += 4;
-   } while ( ( num_found == 0 ) && ( n < max_nonce )
-             && !work_restart[thr_id].restart );
-   *hashes_done = n - first_nonce + 1;
-   return num_found;
+     rintrlv_4x64_4x32( vhashA, vhash, dataLen<<3 );
+
+     haval256_5_4way_init( &ctx.haval );
+     haval256_5_4way_update( &ctx.haval, vhashA, dataLen );
+     haval256_5_4way_close( &ctx.haval, output );
+
+     return 1;
 }
 
 #endif

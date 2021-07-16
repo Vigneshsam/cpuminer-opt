@@ -1,5 +1,4 @@
 #include "blake-gate.h"
-#include "sph_blake.h"
 #include "blake-hash-4way.h"
 #include <string.h>
 #include <stdint.h>
@@ -7,106 +6,115 @@
 
 #if defined (BLAKE_4WAY)
 
+blake256r14_4way_context blake_4w_ctx;
+
 void blakehash_4way(void *state, const void *input)
 {
-     uint32_t vhash[4*4] __attribute__ ((aligned (64)));
-     uint32_t hash0[4] __attribute__ ((aligned (32)));
-     uint32_t hash1[4] __attribute__ ((aligned (32)));
-     uint32_t hash2[4] __attribute__ ((aligned (32)));
-     uint32_t hash3[4] __attribute__ ((aligned (32)));
-     blake256_4way_context ctx;
-
-     blake256_4way_init( &ctx );
-     blake256_4way( &ctx, input, 16 );
-     blake256_4way_close( &ctx, vhash );
-
-     mm_deinterleave_4x32( hash0, hash1, hash2, hash3, vhash, 256 );
-
-     memcpy( state,    hash0, 32 );
-     memcpy( state+32, hash1, 32 );
-     memcpy( state+64, hash1, 32 );
-     memcpy( state+96, hash1, 32 );
+     uint32_t vhash[8*4] __attribute__ ((aligned (64)));
+     blake256r14_4way_context ctx;
+     memcpy( &ctx, &blake_4w_ctx, sizeof ctx );
+     blake256r14_4way_update( &ctx, input + (64<<2), 16 );
+     blake256r14_4way_close( &ctx, vhash );
+     dintrlv_4x32( state, state+32, state+64, state+96, vhash, 256 );
 }
 
-int scanhash_blake_4way( int thr_id, struct work *work, uint32_t max_nonce,
-                         uint64_t *hashes_done )
+int scanhash_blake_4way( struct work *work, uint32_t max_nonce,
+                         uint64_t *hashes_done, struct thr_info *mythr )
 {
    uint32_t vdata[20*4] __attribute__ ((aligned (64)));
    uint32_t hash[8*4] __attribute__ ((aligned (32)));
    uint32_t *pdata = work->data;
    uint32_t *ptarget = work->target;
    const uint32_t first_nonce = pdata[19];
-//   uint32_t HTarget = ptarget[7];
-   uint32_t _ALIGN(32) edata[20];
+   uint32_t HTarget = ptarget[7];
+   __m128i  *noncev = (__m128i*)vdata + 19;   // aligned
    uint32_t n = first_nonce;
-   uint32_t *nonces = work->nonces;
-   bool *found = work->nfound;
-   int num_found = 0;
+   int thr_id = mythr->id;  // thr_id arg is deprecated
 
-//   if (opt_benchmark)
-//      HTarget = 0x7f;
+   if (opt_benchmark)
+      HTarget = 0x7f;
 
-   // we need big endian data...
-   swab32_array( edata, pdata, 20 );
+   mm128_bswap32_intrlv80_4x32( vdata, pdata );
+   blake256r14_4way_init( &blake_4w_ctx );
+   blake256r14_4way_update( &blake_4w_ctx, vdata, 64 );
 
-   mm_interleave_4x32( vdata, edata, edata, edata, edata, 640 );
-
-   uint32_t *noncep = vdata + 76;   // 19*4
    do {
-      found[0] = found[1] = found[2] = found[3] = false;
-      be32enc( noncep,    n   );
-      be32enc( noncep +1, n+1 );
-      be32enc( noncep +2, n+2 );
-      be32enc( noncep +3, n+3 );
+      *noncev = mm128_bswap_32( _mm_set_epi32( n+3, n+2, n+1, n ) );
 
       blakehash_4way( hash, vdata );
 
-      if ( hash[7] == 0 )
+      for ( int i = 0; i < 4; i++ )
+      if ( (hash+(i<<3))[7] <= HTarget )
+      if ( fulltest( hash+(i<<3), ptarget ) && !opt_benchmark )
       {
-         if ( fulltest( hash, ptarget ) )
-         {
-             found[0] = true;
-             num_found++;
-             nonces[0] = n;
-             pdata[19] = n;
-         }
+          pdata[19] = n+i;
+          submit_solution( work, hash+(i<<3), mythr );
       }
-      if ( (hash+8)[7] == 0 ) 
-      {
-         if ( fulltest( hash+8, ptarget ) ) 
-         {
-             found[1] = true;
-             num_found++;
-             nonces[1] = n+1;
-         }
-      }
-      if ( (hash+16)[7] == 0 )
-      {
-          if ( fulltest( hash+8, ptarget ) )
-          {
-              found[2] = true;
-              num_found++;
-              nonces[2] = n+2;
-          }
-      }
-      if ( (hash+24)[7] == 0 )
-      {
-         if ( fulltest( hash+8, ptarget ) )
-         {
-              found[3] = true;
-              num_found++;
-              nonces[3] = n+3;
-         }
-      }
-       n += 4;
-      *hashes_done = n - first_nonce + 1;
+      n += 4;
 
-   } while ( (num_found == 0) && (n < max_nonce) 
-             && !work_restart[thr_id].restart );
-
+   } while ( (n < max_nonce) && !work_restart[thr_id].restart );
    *hashes_done = n - first_nonce + 1;
-   return num_found;
+   return 0;
 }
 
 #endif
 
+#if defined(BLAKE_8WAY)
+
+blake256r14_8way_context blake_8w_ctx;
+
+void blakehash_8way( void *state, const void *input )
+{
+     uint32_t vhash[8*8] __attribute__ ((aligned (64)));
+     blake256r14_8way_context ctx;
+     memcpy( &ctx, &blake_8w_ctx, sizeof ctx );
+     blake256r14_8way( &ctx, input + (64<<3), 16 );
+     blake256r14_8way_close( &ctx, vhash );
+     _dintrlv_8x32( state,     state+ 32, state+ 64, state+ 96,
+                    state+128, state+160, state+192, state+224,
+                    vhash, 256 );
+}
+
+int scanhash_blake_8way( struct work *work, uint32_t max_nonce,
+                         uint64_t *hashes_done, struct thr_info *mythr )
+{
+   uint32_t vdata[20*8] __attribute__ ((aligned (64)));
+   uint32_t hash[8*8] __attribute__ ((aligned (32)));
+   uint32_t *pdata = work->data;
+   uint32_t *ptarget = work->target;
+   const uint32_t first_nonce = pdata[19];
+   uint32_t HTarget = ptarget[7];
+   uint32_t n = first_nonce;
+   __m256i  *noncev = (__m256i*)vdata + 19;   // aligned
+   int thr_id = mythr->id;  // thr_id arg is deprecated
+
+   if (opt_benchmark)
+      HTarget = 0x7f;
+
+   mm256_bswap32_intrlv80_8x32( vdata, pdata );
+
+   blake256r14_8way_init( &blake_8w_ctx );
+   blake256r14_8way( &blake_8w_ctx, vdata, 64 );
+
+   do {
+      *noncev = mm256_bswap_32( _mm256_set_epi32( n+7, n+6, n+5, n+4,
+                                                  n+3, n+2, n+1, n ) );
+      pdata[19] = n;
+
+      blakehash_8way( hash, vdata );
+
+      for ( int i = 0; i < 8; i++ )
+      if ( (hash+i)[7] <= HTarget && fulltest( hash+i, ptarget ) )
+      {
+          pdata[19] = n+i;
+          submit_solution( work, hash+(i<<3), mythr );
+      }
+      n += 8;
+
+   } while ( (n < max_nonce) !work_restart[thr_id].restart );
+
+   *hashes_done = n - first_nonce + 1;
+   return 0;
+}
+
+#endif

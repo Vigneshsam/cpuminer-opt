@@ -8,25 +8,29 @@
 #include "hodl-wolf.h"
 #include "miner.h"
 
-#ifndef NO_AES_NI               
+#if defined(__AES__)               
 
-void GenerateGarbageCore(CacheEntry *Garbage, int ThreadID, int ThreadCount, void *MidHash)
+void GenerateGarbageCore( CacheEntry *Garbage, int ThreadID, int ThreadCount,
+     void *MidHash )
 {
-#ifdef __AVX__
-    uint64_t* TempBufs[SHA512_PARALLEL_N] ;
-    uint64_t* desination[SHA512_PARALLEL_N];
+    const int Chunk = TOTAL_CHUNKS / ThreadCount;
+    const uint32_t StartChunk = ThreadID * Chunk;
+    const uint32_t EndChunk   = StartChunk + Chunk;
 
-    for ( int i=0; i<SHA512_PARALLEL_N; ++i )
+#if defined(__SSE4_2__)
+//#ifdef __AVX__
+    uint64_t* TempBufs[ SHA512_PARALLEL_N ] ;
+    uint64_t* desination[ SHA512_PARALLEL_N ];
+
+    for ( int i=0; i < SHA512_PARALLEL_N; ++i )
     {
-        TempBufs[i] = (uint64_t*)malloc(32);
-        memcpy(TempBufs[i], MidHash, 32);
+        TempBufs[i] = (uint64_t*)malloc( 32 );
+        memcpy( TempBufs[i], MidHash, 32 );
     }
 
-    uint32_t StartChunk = ThreadID * (TOTAL_CHUNKS / ThreadCount);
-    for ( uint32_t i = StartChunk;
-          i < StartChunk + (TOTAL_CHUNKS / ThreadCount); i+= SHA512_PARALLEL_N )
+    for ( uint32_t i = StartChunk; i < EndChunk; i += SHA512_PARALLEL_N )
     {
-        for ( int j=0; j<SHA512_PARALLEL_N; ++j )
+        for ( int j = 0; j < SHA512_PARALLEL_N; ++j )
         {
             ( (uint32_t*)TempBufs[j] )[0] = i + j;
             desination[j] = (uint64_t*)( (uint8_t *)Garbage + ( (i+j)
@@ -35,15 +39,13 @@ void GenerateGarbageCore(CacheEntry *Garbage, int ThreadID, int ThreadCount, voi
         sha512Compute32b_parallel( TempBufs, desination );
     }
 
-    for ( int i=0; i<SHA512_PARALLEL_N; ++i )
+    for ( int i = 0; i < SHA512_PARALLEL_N; ++i )
         free( TempBufs[i] );
 #else
     uint32_t TempBuf[8];
     memcpy( TempBuf, MidHash, 32 );
 
-    uint32_t StartChunk = ThreadID * (TOTAL_CHUNKS / ThreadCount);
-    for ( uint32_t i = StartChunk;
-          i < StartChunk + (TOTAL_CHUNKS / ThreadCount); ++i )
+    for ( uint32_t i = StartChunk; i < EndChunk; ++i )
     {
         TempBuf[0] = i;
         SHA512( ( uint8_t *)TempBuf, 32,
@@ -59,14 +61,16 @@ void Rev256(uint32_t *Dest, const uint32_t *Src)
 }
 */
 
-int scanhash_hodl_wolf( int threadNumber, struct work* work, uint32_t max_nonce,
-                        uint64_t *hashes_done )
+int scanhash_hodl_wolf( struct work* work, uint32_t max_nonce,
+                        uint64_t *hashes_done, struct thr_info *mythr )
 {
-#ifdef __AVX__
+#if defined(__SSE4_2__)
+//#ifdef __AVX__
     uint32_t *pdata = work->data;
     uint32_t *ptarget = work->target;
+    int threadNumber = mythr->id;
     CacheEntry *Garbage = (CacheEntry*)hodl_scratchbuf;
-    CacheEntry Cache[AES_PARALLEL_N];
+    CacheEntry Cache[AES_PARALLEL_N] __attribute__ ((aligned (64)));
     __m128i* data[AES_PARALLEL_N];
     const __m128i* next[AES_PARALLEL_N];
     uint32_t CollisionCount = 0;
@@ -125,9 +129,10 @@ int scanhash_hodl_wolf( int threadNumber, struct work* work, uint32_t max_nonce,
 	      if( FinalPoW[7] <= ptarget[7] )
 	      {
 	          pdata[20] = swab32( BlockHdr[20] );
-		  pdata[21] = swab32( BlockHdr[21] );
-		  *hashes_done = CollisionCount;
-		  return(1);
+             pdata[21] = swab32( BlockHdr[21] );
+		       *hashes_done = CollisionCount;
+             submit_solution( work, FinalPoW, mythr );
+             return(0);
 	      }
 	   }
 	}
@@ -144,17 +149,20 @@ int scanhash_hodl_wolf( int threadNumber, struct work* work, uint32_t max_nonce,
     CacheEntry *Garbage = (CacheEntry*)hodl_scratchbuf;
     CacheEntry Cache;
     uint32_t CollisionCount = 0;
+    int threadNumber = mythr->id;
 
     swab32_array( BlockHdr, pdata, 20 );
         // Search for pattern in psuedorandom data      
         int searchNumber = COMPARE_SIZE / opt_n_threads;
         int startLoc = threadNumber * searchNumber;
 
+        if ( opt_debug )
+           applog( LOG_DEBUG,"Hash target= %08lx", ptarget[7] );
+
         for(int32_t k = startLoc; k < startLoc + searchNumber && !work_restart[threadNumber].restart; k++)
         {
            // copy data to first l2 cache
            memcpy(Cache.dwords, Garbage + k, GARBAGE_SLICE_SIZE);
-#ifndef NO_AES_NI               
            for(int j = 0; j < AES_ITERATIONS; j++)
            {
                 CacheEntry TmpXOR;
@@ -178,7 +186,6 @@ int scanhash_hodl_wolf( int threadNumber, struct work* work, uint32_t max_nonce,
                 AES256CBC( Cache.dqwords, TmpXOR.dqwords, ExpKey,
                         TmpXOR.dqwords[ (GARBAGE_SLICE_SIZE / sizeof(__m128i))
                                                              - 1 ], 256 );                 }
-#endif
            // use last X bits as solution
            if( ( Cache.dwords[ (GARBAGE_SLICE_SIZE >> 2) - 1 ]
                                          & (COMPARE_SIZE - 1) ) < 1000 )
@@ -192,7 +199,8 @@ int scanhash_hodl_wolf( int threadNumber, struct work* work, uint32_t max_nonce,
                   pdata[20] = swab32( BlockHdr[20] );
                   pdata[21] = swab32( BlockHdr[21] );
                   *hashes_done = CollisionCount;
-                  return(1);
+                  submit_solution( work, FinalPoW, mythr );
+                  return(0);
               }
            }
         }
@@ -200,7 +208,7 @@ int scanhash_hodl_wolf( int threadNumber, struct work* work, uint32_t max_nonce,
     *hashes_done = CollisionCount;
     return(0);
 
-#endif
+#endif  // AVX else
 
 }
 
@@ -212,5 +220,5 @@ void GenRandomGarbage(CacheEntry *Garbage, uint32_t *pdata, int thr_id)
 	GenerateGarbageCore(Garbage, thr_id, opt_n_threads, MidHash);
 }
 
-#endif
+#endif // AES
 
